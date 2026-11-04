@@ -2,6 +2,7 @@ import express from "express";
 import { MongoClient } from "mongodb";
 import "dotenv/config";
 import cors from "cors";
+import { ObjectId } from "mongodb";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -68,6 +69,17 @@ app.post("/add-event", async (req, res) => {
 // Test route to ensure server works
 app.get("/", (req, res) => {
   res.send("Social Development Events Server is Running Running!");
+});
+
+app.get("/events", async (req, res) => {
+  const events = await eventsCollection.find({}).toArray();
+  res.send(events);
+});
+
+app.get("/events/:id", async (req, res) => {
+  const { id } = req.params;
+  const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
+  res.send(event);
 });
 
 app.listen(port, () => {

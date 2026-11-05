@@ -2,6 +2,7 @@ import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import cors from "cors";
+import { requireAuth } from "./jwt.js";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -29,9 +30,38 @@ app.get("/", (req, res) => {
   res.send("Social Development Events Server is Running!");
 });
 
-app.post("/add-event", async (req, res) => {
+// Featured section: the home page calls this with the user's JWT
+// (Authorization: Bearer <token>) — it is a protected API on purpose.
+app.get("/featured", requireAuth, async (req, res) => {
   try {
-    const result = await eventsCollection.insertOne(req.body);
+    // `startAt` is an ISO-like string ("YYYY-MM-DDTHH:mm"), so string
+    // comparison against an ISO "now" sorts correctly.
+    const now = new Date().toISOString();
+    const events = await eventsCollection
+      .find({ publish: { $ne: false }, startAt: { $gt: now } })
+      .sort({ startAt: 1 })
+      .limit(6)
+      .toArray();
+    res.json(events);
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch featured events" });
+  }
+});
+
+app.post("/add-event", requireAuth, async (req, res) => {
+  try {
+    // Ownership comes from the verified token, never from the request body.
+    const event = {
+      ...req.body,
+      createdBy: req.user.email,
+      joinedUsers: Array.isArray(req.body.joinedUsers)
+        ? req.body.joinedUsers
+        : [],
+    };
+    const result = await eventsCollection.insertOne(event);
     res.status(201).json({ success: true, insertedId: result.insertedId });
   } catch (error) {
     console.error(error);
@@ -41,7 +71,15 @@ app.post("/add-event", async (req, res) => {
 
 app.get("/events", async (req, res) => {
   try {
-    const events = await eventsCollection.find({}).toArray();
+    // Optional filters: ?createdBy=<email> and/or ?joinedBy=<email>
+    const query = {};
+    const { createdBy, joinedBy } = req.query;
+    if (createdBy) query.createdBy = createdBy;
+    if (joinedBy) query.joinedUsers = joinedBy;
+    const events = await eventsCollection
+      .find(query)
+      .sort({ startAt: 1 }) // upcoming (earliest) events first
+      .toArray();
     res.json(events);
   } catch (error) {
     console.error(error);
@@ -68,12 +106,92 @@ app.get("/events/:id", async (req, res) => {
   }
 });
 
-app.patch("/events/:id", async (req, res) => {
+// Join / leave an event. The caller passes the logged-in user's email —
+// the Express server intentionally knows nothing about better-auth sessions.
+app.post("/events/:id/join", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: "Invalid id" });
     }
+    const { email } = req.user || {};
+    if (!email) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Token has no email claim" });
+    }
+    const result = await eventsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $addToSet: { joinedUsers: email } },
+    );
+    if (result.matchedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to join event" });
+  }
+});
+
+app.delete("/events/:id/join", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid id" });
+    }
+    const { email } = req.user || {};
+    if (!email) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Token has no email claim" });
+    }
+    const result = await eventsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $pull: { joinedUsers: email } },
+    );
+    if (result.matchedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to leave event" });
+  }
+});
+
+app.patch("/events/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid id" });
+    }
+    // Ownership guard: only the creator may update this event. Events created
+    // after tracking was added carry a `createdBy` email; legacy docs without
+    // one stay editable.
+    const existingEvent = await eventsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+    if (!existingEvent) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
+    }
+    if (existingEvent.createdBy && existingEvent.createdBy !== req.user.email) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only update events you created",
+      });
+    }
+
     const { _id, ...updatedData } = req.body;
     const result = await eventsCollection.updateOne(
       { _id: new ObjectId(id) },
@@ -91,8 +209,27 @@ app.patch("/events/:id", async (req, res) => {
   }
 });
 
-app.delete("/events/:id", async (req, res) => {
+app.delete("/events/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Invalid id" });
+  }
+
+  // Ownership guard: only the creator may delete this event (see PATCH above).
+  const existingEvent = await eventsCollection.findOne({
+    _id: new ObjectId(id),
+  });
+  if (!existingEvent) {
+    return res
+      .status(404)
+      .json({ success: false, message: "Event not found" });
+  }
+  if (existingEvent.createdBy && existingEvent.createdBy !== req.user.email) {
+    return res
+      .status(403)
+      .json({ success: false, message: "You can only delete events you created" });
+  }
+
   const result = await eventsCollection.deleteOne({ _id: new ObjectId(id) });
   res.json(result);
 });

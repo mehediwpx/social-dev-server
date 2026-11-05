@@ -91,6 +91,12 @@ app.patch("/events/:id", async (req, res) => {
   }
 });
 
+app.delete("/events/:id", async (req, res) => {
+  const { id } = req.params;
+  const result = await eventsCollection.deleteOne({ _id: new ObjectId(id) });
+  res.json(result);
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });

@@ -1,87 +1,96 @@
 import express from "express";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import cors from "cors";
-import { ObjectId } from "mongodb";
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Database Configuration
 const client = new MongoClient(process.env.MONGODB_URL);
 let eventsCollection;
 
-export async function connectToMongoDB() {
+async function connectToMongoDB() {
   try {
     await client.connect();
     console.log("You successfully connected to MongoDB!");
-
-    const db = client.db("socialDevDB");
-    eventsCollection = db.collection("events");
-
-    return client;
+    eventsCollection = client.db("socialDevDB").collection("events");
   } catch (err) {
     console.error("MongoDB Connection Failed:", err);
+    process.exit(1);
   }
 }
 
-// Initialize database connection
 await connectToMongoDB();
 
-// POST route to handle form submission data from the client
-// URL: http://localhost:5000/add-event
+app.get("/", (req, res) => {
+  res.send("Social Development Events Server is Running!");
+});
+
 app.post("/add-event", async (req, res) => {
   try {
-    // Guard clause if DB isn't initialized yet
-    if (!eventsCollection) {
-      return res.status(500).json({
-        success: false,
-        message: "Database not connected",
-      });
-    }
-
-    const data = req.body;
-    console.log("Data received from client:", data);
-
-    // Insert data into your MongoDB events collection
-    const result = await eventsCollection.insertOne(data);
-
-    // Send exactly ONE clean JSON response back to the Next.js frontend
-    return res.status(201).json({
-      success: true,
-      message: "Event added successfully",
-      insertedId: result.insertedId,
-    });
+    const result = await eventsCollection.insertOne(req.body);
+    res.status(201).json({ success: true, insertedId: result.insertedId });
   } catch (error) {
-    console.error("Error inserting event:", error);
-    // Use return here to prevent any further code execution
-    return res.status(500).json({
-      success: false,
-      message: "Failed to save event data",
-    });
+    console.error(error);
+    res.status(500).json({ success: false, message: "Failed to add event" });
   }
 });
 
-// Test route to ensure server works
-app.get("/", (req, res) => {
-  res.send("Social Development Events Server is Running Running!");
-});
-
 app.get("/events", async (req, res) => {
-  const events = await eventsCollection.find({}).toArray();
-  res.send(events);
+  try {
+    const events = await eventsCollection.find({}).toArray();
+    res.json(events);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Failed to fetch events" });
+  }
 });
 
 app.get("/events/:id", async (req, res) => {
-  const { id } = req.params;
-  const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
-  res.send(event);
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid id" });
+    }
+    const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
+    if (!event) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
+    }
+    res.json(event);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Failed to fetch event" });
+  }
+});
+
+app.patch("/events/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid id" });
+    }
+    const { _id, ...updatedData } = req.body;
+    const result = await eventsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updatedData },
+    );
+    if (result.matchedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Failed to update event" });
+  }
 });
 
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
